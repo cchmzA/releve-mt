@@ -1,0 +1,13 @@
+{
+  "name": "Relevé MT",
+  "short_name": "Relevé MT",
+  "description": "تطبيق قراءة عدادات MT الشهرية",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F5F6F8",
+  "theme_color": "#0B4F6C",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": []
+}

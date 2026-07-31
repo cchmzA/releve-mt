@@ -1,0 +1,66 @@
+name: Build Relevé MT APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Configure Supabase
+        env:
+          RAW_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          RAW_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          # Nettoyer l'URL: enlever /rest/v1, /auth/v1, slash final, espaces
+          CLEAN_URL=$(printf '%s' "$RAW_URL" | sed -E 's/[[:space:]]+//g; s#/$##; s#/rest/v1$##I; s#/auth/v1$##I; s#/storage/v1$##I; s#/functions/v1$##I')
+          CLEAN_KEY=$(printf '%s' "$RAW_KEY" | tr -d '[:space:]')
+          if [ -z "$CLEAN_URL" ] || [ -z "$CLEAN_KEY" ]; then
+            echo "::error::VITE_SUPABASE_URL ou VITE_SUPABASE_ANON_KEY manquant dans GitHub Secrets"
+            exit 1
+          fi
+          echo "Supabase URL (sans clé): $CLEAN_URL"
+          printf 'VITE_SUPABASE_URL=%s\nVITE_SUPABASE_ANON_KEY=%s\n' "$CLEAN_URL" "$CLEAN_KEY" > .env
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: releve-mt-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

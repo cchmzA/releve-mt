@@ -1,0 +1,8 @@
+{
+  "appId": "ma.relevemt.app",
+  "appName": "Relevé MT",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}

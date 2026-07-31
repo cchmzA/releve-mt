@@ -1,0 +1,362 @@
+import { useEffect, useMemo, useState } from "react";
+import { supabase } from "../lib/supabaseClient";
+import { subscribeReadings } from "../lib/readings";
+import { signOut } from "../lib/auth";
+import { CLIENTS } from "../data/clients";
+
+const byContract = (a, b) => Number(a.ct) - Number(b.ct);
+
+export default function ManagerDashboard({ profile }) {
+  const [tab, setTab] = useState("readings");
+  const [rows, setRows] = useState([]);
+  const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [syncStatus, setSyncStatus] = useState("CONNECTING");
+  const [lastSync, setLastSync] = useState(null);
+
+  const [employees, setEmployees] = useState([]);
+  const [assignments, setAssignments] = useState([]);
+  const [selectedEmployee, setSelectedEmployee] = useState("");
+  const [assignmentSearch, setAssignmentSearch] = useState("");
+  const [assignmentFilter, setAssignmentFilter] = useState("all");
+  const [savingContract, setSavingContract] = useState(null);
+  const [assignmentLoading, setAssignmentLoading] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const loadReadings = async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("meter_readings")
+      .select("*")
+      .eq("period", period)
+      .order("updated_at", { ascending: false });
+
+    if (!error) setRows(data || []);
+    setLoading(false);
+  };
+
+  const loadEmployeesAndAssignments = async () => {
+    setAssignmentLoading(true);
+    const [{ data: employeeData, error: employeeError }, { data: assignmentData, error: assignmentError }] = await Promise.all([
+      supabase
+        .from("profiles")
+        .select("id, full_name, role, active")
+        .eq("role", "employee")
+        .order("full_name"),
+      supabase
+        .from("employee_clients")
+        .select("employee_id, contract_no, active")
+        .eq("active", true),
+    ]);
+
+    if (!employeeError) {
+      setEmployees(employeeData || []);
+      if (!selectedEmployee && employeeData?.length) setSelectedEmployee(employeeData[0].id);
+    }
+    if (!assignmentError) setAssignments(assignmentData || []);
+    setAssignmentLoading(false);
+  };
+
+  const syncNow = async () => {
+    setSyncStatus("CONNECTING");
+    try {
+      await loadReadings();
+      setLastSync(new Date());
+      setSyncStatus("SUBSCRIBED");
+    } catch {
+      setSyncStatus(navigator.onLine ? "CONNECTING" : "OFFLINE");
+    }
+  };
+
+  useEffect(() => {
+    loadReadings();
+    const online = () => syncNow();
+    const offline = () => setSyncStatus("OFFLINE");
+    window.addEventListener("online", online);
+    window.addEventListener("offline", offline);
+    if (!navigator.onLine) setSyncStatus("OFFLINE");
+    const unsubscribe = subscribeReadings(payload => {
+      const changed = payload.new || payload.old;
+      if (!changed || changed.period !== period) return;
+
+      setLastSync(new Date());
+      setRows(prev => {
+        if (payload.eventType === "DELETE") return prev.filter(x => x.id !== payload.old?.id);
+        const i = prev.findIndex(x => x.contract_no === changed.contract_no);
+        if (i === -1) return [changed, ...prev];
+        const copy = [...prev];
+        copy[i] = changed;
+        return copy;
+      });
+    }, status => {
+      setSyncStatus(status);
+      if (status === "SUBSCRIBED") loadReadings();
+    });
+    return () => {
+      unsubscribe();
+      window.removeEventListener("online", online);
+      window.removeEventListener("offline", offline);
+    };
+  }, [period]);
+
+  useEffect(() => {
+    loadEmployeesAndAssignments();
+  }, []);
+
+  const selectedEmployeeName = employees.find(e => e.id === selectedEmployee)?.full_name || "";
+
+  const selectedContracts = useMemo(() => {
+    const set = new Set(
+      assignments
+        .filter(a => a.employee_id === selectedEmployee && a.active)
+        .map(a => Number(a.contract_no))
+    );
+    return set;
+  }, [assignments, selectedEmployee]);
+
+  const assignmentVisibleClients = useMemo(() => {
+    const q = assignmentSearch.trim().toLowerCase();
+    return CLIENTS
+      .filter(c => {
+        const assigned = selectedContracts.has(Number(c.ct));
+        if (assignmentFilter === "assigned" && !assigned) return false;
+        if (assignmentFilter === "unassigned" && assigned) return false;
+        if (!q) return true;
+        return [c.ct, c.sn, c.s, c.nm].some(v => String(v).toLowerCase().includes(q));
+      })
+      .sort(byContract);
+  }, [assignmentSearch, assignmentFilter, selectedContracts]);
+
+  const employeeStats = useMemo(() => {
+    const counts = Object.fromEntries(employees.map(e => [e.id, 0]));
+    assignments.forEach(a => {
+      if (a.active && counts[a.employee_id] !== undefined) counts[a.employee_id] += 1;
+    });
+    return counts;
+  }, [employees, assignments]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(r =>
+      String(r.contract_no).includes(q) ||
+      String(r.meter_no).toLowerCase().includes(q) ||
+      String(r.employee_name || "").toLowerCase().includes(q)
+    );
+  }, [rows, search]);
+
+  const toggleAssignment = async contractNo => {
+    if (!selectedEmployee || savingContract !== null) return;
+    const contract = Number(contractNo);
+    const exists = selectedContracts.has(contract);
+    setSavingContract(contract);
+    setMessage("");
+
+    try {
+      if (exists) {
+        const { error } = await supabase
+          .from("employee_clients")
+          .delete()
+          .eq("employee_id", selectedEmployee)
+          .eq("contract_no", contract);
+        if (error) throw error;
+        setAssignments(prev => prev.filter(a => !(a.employee_id === selectedEmployee && Number(a.contract_no) === contract)));
+      } else {
+        const { data, error } = await supabase
+          .from("employee_clients")
+          .upsert({ employee_id: selectedEmployee, contract_no: contract, active: true }, { onConflict: "employee_id,contract_no" })
+          .select()
+          .single();
+        if (error) throw error;
+        setAssignments(prev => [
+          ...prev.filter(a => !(a.employee_id === selectedEmployee && Number(a.contract_no) === contract)),
+          data,
+        ]);
+      }
+    } catch (error) {
+      setMessage(error.message || "تعذر حفظ التخصيص");
+    } finally {
+      setSavingContract(null);
+    }
+  };
+
+  const assignAllVisible = async () => {
+    if (!selectedEmployee || !assignmentVisibleClients.length || savingContract !== null) return;
+    const missing = assignmentVisibleClients
+      .map(c => Number(c.ct))
+      .filter(ct => !selectedContracts.has(ct));
+    if (!missing.length) return;
+
+    setSavingContract("bulk");
+    setMessage("");
+    try {
+      const payload = missing.map(contract_no => ({ employee_id: selectedEmployee, contract_no, active: true }));
+      const { data, error } = await supabase
+        .from("employee_clients")
+        .upsert(payload, { onConflict: "employee_id,contract_no" })
+        .select();
+      if (error) throw error;
+      setAssignments(prev => [...prev.filter(a => !(a.employee_id === selectedEmployee && missing.includes(Number(a.contract_no)))), ...(data || [])]);
+    } catch (error) {
+      setMessage(error.message || "تعذر تخصيص الزبناء");
+    } finally {
+      setSavingContract(null);
+    }
+  };
+
+  const removeAllVisible = async () => {
+    if (!selectedEmployee || !assignmentVisibleClients.length || savingContract !== null) return;
+    const selected = assignmentVisibleClients
+      .map(c => Number(c.ct))
+      .filter(ct => selectedContracts.has(ct));
+    if (!selected.length) return;
+
+    setSavingContract("bulk");
+    setMessage("");
+    try {
+      const { error } = await supabase
+        .from("employee_clients")
+        .delete()
+        .eq("employee_id", selectedEmployee)
+        .in("contract_no", selected);
+      if (error) throw error;
+      setAssignments(prev => prev.filter(a => !(a.employee_id === selectedEmployee && selected.includes(Number(a.contract_no)))));
+    } catch (error) {
+      setMessage(error.message || "تعذر إزالة التخصيص");
+    } finally {
+      setSavingContract(null);
+    }
+  };
+
+  return (
+    <div dir="rtl" style={{ minHeight: "100vh", background: "#F5F6F8", paddingBottom: 30, fontFamily: "Arial,sans-serif", color: "#16202A" }}>
+      <header style={{ background: "#0B4F6C", color: "#fff", padding: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 19 }}>لوحة المسؤول</div>
+            <div style={{ fontSize: 12, opacity: .85 }}>{profile.full_name}</div>
+          </div>
+          <button onClick={signOut} style={{ padding: "8px 12px", borderRadius: 9, border: 0 }}>خروج</button>
+        </div>
+
+        <div style={{ marginTop: 9, fontSize: 11, opacity: .95, display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}><span>مزامنة الموظفين: {syncStatus === "SUBSCRIBED" ? "متصلة ✓ — أي قراءة جديدة تظهر هنا مباشرة" : syncStatus === "OFFLINE" ? "غير متصل — سيتم التحديث عند عودة الإنترنت" : "جاري الاتصال..."}{lastSync ? ` · آخر تحديث ${lastSync.toLocaleTimeString("ar-MA", {hour:"2-digit", minute:"2-digit"})}` : ""}</span><button onClick={syncNow} style={{border:0,borderRadius:7,padding:"5px 8px",fontSize:10,fontWeight:800}}>مزامنة الآن</button></div>
+
+        <div style={{ display: "flex", gap: 7, marginTop: 14 }}>
+          <button onClick={() => setTab("readings")} style={tabButton(tab === "readings")}>القراءات</button>
+          <button onClick={() => setTab("assignments")} style={tabButton(tab === "assignments")}>الموظفون والزبناء</button>
+        </div>
+      </header>
+
+      {tab === "readings" ? (
+        <div style={{ padding: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <input type="month" value={period} onChange={e => setPeriod(e.target.value)} style={{ padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث عقد / عداد / موظف" style={{ flex: 1, padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
+          </div>
+
+          <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+            <b>{filtered.length}</b> قراءة في {period}
+            {loading ? <span> — جاري التحميل...</span> : <span> — التحديث المباشر مفعل ✓</span>}
+          </div>
+
+          {filtered.map(row => (
+            <div key={row.id} style={{ background: "#fff", borderRadius: 12, padding: 14, marginBottom: 8 }}>
+              <div style={{ fontWeight: 900 }}>عقد {row.contract_no}</div>
+              <div style={{ fontSize: 12, color: "#5B6B78" }}>عداد: {row.meter_no}</div>
+              <div style={{ fontSize: 12, color: "#5B6B78" }}>الموظف: {row.employee_name || "—"}</div>
+              <div style={{ fontSize: 12, color: "#5B6B78" }}>التاريخ: {row.reading_date}</div>
+              <div style={{ marginTop: 8, fontFamily: "monospace", wordBreak: "break-all" }}>{(row.indexes || []).join(" · ")}</div>
+            </div>
+          ))}
+          {!loading && filtered.length === 0 && <Empty text="لا توجد قراءات لهذه الفترة." />}
+        </div>
+      ) : (
+        <div style={{ padding: 16 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>توزيع الزبناء على الموظفين</div>
+            <div style={{ color: "#5B6B78", fontSize: 12, marginTop: 5 }}>
+              اختر موظفًا ثم فعّل الزبناء الذين سيظهرون له في تطبيق القراءة. التغيير يحفظ مباشرة.
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 8, marginBottom: 12 }}>
+            {employees.map(employee => (
+              <button key={employee.id} onClick={() => setSelectedEmployee(employee.id)} style={{
+                textAlign: "right", padding: 12, borderRadius: 11,
+                border: selectedEmployee === employee.id ? "2px solid #0B4F6C" : "1px solid #D7DEE3",
+                background: selectedEmployee === employee.id ? "#EAF5F9" : "#fff",
+              }}>
+                <div style={{ fontWeight: 900 }}>{employee.full_name}</div>
+                <div style={{ fontSize: 11, color: "#5B6B78", marginTop: 4 }}>{employeeStats[employee.id] || 0} زبون مخصص</div>
+              </button>
+            ))}
+          </div>
+
+          {assignmentLoading ? <div style={{ padding: 20 }}>جاري تحميل الموظفين...</div> : employees.length === 0 ? (
+            <Empty text="لا توجد حسابات موظفين في profiles. يجب إنشاء حساب الموظف أولًا في Supabase Authentication ثم إضافة ملفه في profiles." />
+          ) : (
+            <>
+              <div style={{ background: "#fff", borderRadius: 14, padding: 12, marginBottom: 10 }}>
+                <div style={{ fontWeight: 900 }}>الموظف: {selectedEmployeeName || "—"}</div>
+                <div style={{ fontSize: 12, color: "#5B6B78", marginTop: 3 }}>{selectedContracts.size} / {CLIENTS.length} زبون مخصص</div>
+              </div>
+
+              <div style={{ display: "flex", gap: 7, marginBottom: 8 }}>
+                <input value={assignmentSearch} onChange={e => setAssignmentSearch(e.target.value)} placeholder="بحث اسم / عقد / عداد / قطاع" style={{ flex: 1, padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
+                <select value={assignmentFilter} onChange={e => setAssignmentFilter(e.target.value)} style={{ padding: 10, borderRadius: 9, border: "1px solid #CBD5DB" }}>
+                  <option value="all">الكل</option>
+                  <option value="assigned">مخصص</option>
+                  <option value="unassigned">غير مخصص</option>
+                </select>
+              </div>
+
+              <div style={{ display: "flex", gap: 7, marginBottom: 10 }}>
+                <button onClick={assignAllVisible} disabled={savingContract !== null} style={{ flex: 1, padding: 10, border: 0, borderRadius: 9, background: "#0B4F6C", color: "#fff", fontWeight: 800 }}>تخصيص الظاهر</button>
+                <button onClick={removeAllVisible} disabled={savingContract !== null} style={{ flex: 1, padding: 10, border: "1px solid #D32F2F", borderRadius: 9, background: "#fff", color: "#B00020", fontWeight: 800 }}>إزالة تخصيص الظاهر</button>
+              </div>
+
+              {message && <div style={{ background: "#FFF3F3", color: "#B00020", border: "1px solid #D32F2F", borderRadius: 9, padding: 10, marginBottom: 10, fontSize: 12 }}>{message}</div>}
+
+              {assignmentVisibleClients.map(c => {
+                const assigned = selectedContracts.has(Number(c.ct));
+                return (
+                  <div key={c.ct} style={{ background: "#fff", borderRadius: 11, padding: 11, marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 900, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.nm}</div>
+                      <div style={{ fontSize: 11, color: "#5B6B78", marginTop: 3 }}>{c.s} · عقد {c.ct} · عداد {c.sn}</div>
+                    </div>
+                    <button onClick={() => toggleAssignment(c.ct)} disabled={savingContract !== null} style={{
+                      minWidth: 90, padding: "8px 10px", borderRadius: 9,
+                      border: assigned ? "1px solid #2E7D32" : "1px solid #CBD5DB",
+                      background: assigned ? "#EAF6EC" : "#fff", color: assigned ? "#2E7D32" : "#39444D", fontWeight: 900,
+                    }}>
+                      {savingContract === Number(c.ct) ? "..." : assigned ? "مخصص ✓" : "تخصيص"}
+                    </button>
+                  </div>
+                );
+              })}
+              {assignmentVisibleClients.length === 0 && <Empty text="لا توجد نتائج." />}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function tabButton(active) {
+  return {
+    flex: 1,
+    padding: 10,
+    borderRadius: 9,
+    border: active ? "1px solid #fff" : "1px solid rgba(255,255,255,.35)",
+    background: active ? "#fff" : "rgba(255,255,255,.12)",
+    color: active ? "#0B4F6C" : "#fff",
+    fontWeight: 900,
+  };
+}
+
+function Empty({ text }) {
+  return <div style={{ background: "#fff", borderRadius: 12, padding: 20, textAlign: "center", color: "#687781" }}>{text}</div>;
+}
