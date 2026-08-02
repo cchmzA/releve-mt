@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { exportRowsToExcel } from "../lib/exportExcel";
 import { supabase } from "../lib/supabaseClient";
 import { subscribeReadings } from "../lib/readings";
 import { signOut } from "../lib/auth";
 import { loadClients, addClient, deactivateClient, subscribeClients } from "../lib/clients";
-import { bulkImportReadings } from "../lib/readings";
-import { parseReadingsWorkbook } from "../lib/importExcel";
 
 const byContract = (a, b) => Number(a.ct) - Number(b.ct);
 
@@ -30,14 +29,7 @@ export default function ManagerDashboard({ profile }) {
   const [savingContract, setSavingContract] = useState(null);
   const [assignmentLoading, setAssignmentLoading] = useState(false);
   const [message, setMessage] = useState("");
-
-  const [importParsed, setImportParsed] = useState(null); // { valid, invalid, total }
-  const [importFileName, setImportFileName] = useState("");
-  const [importParsing, setImportParsing] = useState(false);
-  const [importRunning, setImportRunning] = useState(false);
-  const [importProgress, setImportProgress] = useState(null); // { done, total }
-  const [importResult, setImportResult] = useState(null); // { saved, failed }
-  const [importError, setImportError] = useState("");
+  const [exportingAll, setExportingAll] = useState(false);
 
   const loadReadings = async () => {
     setLoading(true);
@@ -169,55 +161,6 @@ export default function ManagerDashboard({ profile }) {
     }
   };
 
-  const handleImportFile = async e => {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-selecting the same file later
-    if (!file) return;
-
-    setImportError("");
-    setImportResult(null);
-    setImportParsed(null);
-    setImportFileName(file.name);
-    setImportParsing(true);
-    try {
-      const buffer = await file.arrayBuffer();
-      const knownContractNos = clients.map(c => Number(c.ct));
-      const parsed = parseReadingsWorkbook(buffer, knownContractNos);
-      setImportParsed(parsed);
-    } catch (error) {
-      setImportError(error.message || "تعذرت قراءة الملف. تأكد أنه ملف Excel (.xlsx) صحيح.");
-    } finally {
-      setImportParsing(false);
-    }
-  };
-
-  const confirmImport = async () => {
-    if (!importParsed?.valid?.length || importRunning) return;
-    setImportRunning(true);
-    setImportProgress({ done: 0, total: importParsed.valid.length });
-    setImportResult(null);
-    try {
-      const result = await bulkImportReadings(importParsed.valid, {
-        employeeName: `استيراد Excel — ${profile.full_name}`,
-        onProgress: (done, total) => setImportProgress({ done, total }),
-      });
-      setImportResult(result);
-      if (result.saved > 0) await loadReadings();
-    } catch (error) {
-      setImportError(error.message || "تعذر الاستيراد.");
-    } finally {
-      setImportRunning(false);
-    }
-  };
-
-  const resetImport = () => {
-    setImportParsed(null);
-    setImportFileName("");
-    setImportResult(null);
-    setImportError("");
-    setImportProgress(null);
-  };
-
   const selectedEmployeeName = employees.find(e => e.id === selectedEmployee)?.full_name || "";
 
   const selectedContracts = useMemo(() => {
@@ -343,6 +286,50 @@ export default function ManagerDashboard({ profile }) {
     }
   };
 
+  const exportAllClients = async () => {
+    if (exportingAll) return;
+    setExportingAll(true);
+    try {
+      const rowsByContract = new Map(rows.map(r => [Number(r.contract_no), r]));
+      const exportRows = [];
+      clients.slice().sort(byContract).forEach(c => {
+        const row = rowsByContract.get(Number(c.ct));
+        const newVals = row?.indexes || [];
+        const old = c.a || [];
+        c.p.forEach((poste, i) => {
+          const oldV = old[i] ?? "";
+          const newV = newVals[i] ?? "";
+          exportRows.push({
+            "الفترة": period,
+            "الموظف": row?.employee_name || "—",
+            "القطاع": c.s,
+            "رقم العداد": c.sn,
+            "رقم العقد": c.ct,
+            "اسم الزبون": c.nm,
+            "Index": i + 1,
+            "البيان": poste,
+            "الفهرس القديم": oldV,
+            "الفهرس الجديد": newV,
+            "الفرق": newV === "" || oldV === "" ? "" : Number(newV) - Number(oldV),
+          });
+        });
+      });
+      await exportRowsToExcel({
+        rows: exportRows,
+        columnWidths: [
+          {wch:10},{wch:22},{wch:15},{wch:14},{wch:12},{wch:38},
+          {wch:8},{wch:12},{wch:15},{wch:15},{wch:10}
+        ],
+        sheetName: "كل الزبناء",
+        fileName: `releve_MT_كل_الزبناء_${period}.xlsx`,
+      });
+    } catch (error) {
+      alert(error.message || "تعذر تصدير ملف Excel.");
+    } finally {
+      setExportingAll(false);
+    }
+  };
+
   return (
     <div dir="rtl" style={{ minHeight: "100vh", background: "#F5F6F8", paddingBottom: 30, fontFamily: "Arial,sans-serif", color: "#16202A" }}>
       <header style={{ background: "#0B4F6C", color: "#fff", padding: 16 }}>
@@ -360,16 +347,19 @@ export default function ManagerDashboard({ profile }) {
           <button onClick={() => setTab("readings")} style={tabButton(tab === "readings")}>القراءات</button>
           <button onClick={() => setTab("assignments")} style={tabButton(tab === "assignments")}>الموظفون والزبناء</button>
           <button onClick={() => setTab("clients")} style={tabButton(tab === "clients")}>الزبناء</button>
-          <button onClick={() => setTab("import")} style={tabButton(tab === "import")}>استيراد</button>
         </div>
       </header>
 
-      {tab === "readings" && (
+      {tab === "readings" ? (
         <div style={{ padding: 16 }}>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input type="month" value={period} onChange={e => setPeriod(e.target.value)} style={{ padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="بحث عقد / عداد / موظف" style={{ flex: 1, padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
           </div>
+
+          <button onClick={exportAllClients} disabled={exportingAll || !clients.length} style={{ width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#F0A202", fontWeight: 900, marginBottom: 12, opacity: exportingAll ? .7 : 1 }}>
+            {exportingAll ? "جاري التصدير..." : "تصدير جميع الزبناء (Excel)"}
+          </button>
 
           <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
             <b>{filtered.length}</b> قراءة في {period}
@@ -387,9 +377,7 @@ export default function ManagerDashboard({ profile }) {
           ))}
           {!loading && filtered.length === 0 && <Empty text="لا توجد قراءات لهذه الفترة." />}
         </div>
-      )}
-
-      {tab === "assignments" && (
+      ) : (
         <div style={{ padding: 16 }}>
           <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
             <div style={{ fontWeight: 900, fontSize: 16 }}>توزيع الزبناء على الموظفين</div>
@@ -500,108 +488,6 @@ export default function ManagerDashboard({ profile }) {
               </button>
             </div>
           ))}
-        </div>
-      )}
-
-      {tab === "import" && (
-        <div style={{ padding: 16 }}>
-          <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
-            <div style={{ fontWeight: 900, fontSize: 16 }}>استيراد قراءات من Excel</div>
-            <div style={{ color: "#5B6B78", fontSize: 12, marginTop: 5 }}>
-              عمر ملف النموذج (رقم العقد، الفترة، تاريخ القراءة، و22 خانة Index)، ثم اختاره هنا للمعاينة قبل الحفظ. رقم العقد خاصو يطابق زبون موجود، والفترة والقراءة غادي يتسجلو أو يتحدثو حسب نفس القاعدة ديال (عقد + فترة).
-            </div>
-          </div>
-
-          <label style={{
-            display: "block", background: "#fff", border: "2px dashed #B7C4CC", borderRadius: 12,
-            padding: 20, textAlign: "center", marginBottom: 12, cursor: "pointer",
-          }}>
-            <input type="file" accept=".xlsx,.xls" onChange={handleImportFile} style={{ display: "none" }} disabled={importParsing || importRunning} />
-            <div style={{ fontWeight: 900, color: "#0B4F6C" }}>{importParsing ? "جاري القراءة..." : "اختر ملف Excel (.xlsx)"}</div>
-            {importFileName && <div style={{ fontSize: 12, color: "#5B6B78", marginTop: 6 }}>{importFileName}</div>}
-          </label>
-
-          {importError && (
-            <div style={{ background: "#FFF3F3", color: "#B00020", border: "1px solid #D32F2F", borderRadius: 9, padding: 10, marginBottom: 12, fontSize: 12 }}>{importError}</div>
-          )}
-
-          {importParsed && !importResult && (
-            <>
-              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                <div style={{ flex: 1, background: "#fff", borderRadius: 12, padding: 12, textAlign: "center" }}>
-                  <div style={{ fontSize: 22, fontWeight: 900, color: "#2E7D32" }}>{importParsed.valid.length}</div>
-                  <div style={{ fontSize: 11, color: "#5B6B78" }}>سطر صحيح</div>
-                </div>
-                <div style={{ flex: 1, background: "#fff", borderRadius: 12, padding: 12, textAlign: "center" }}>
-                  <div style={{ fontSize: 22, fontWeight: 900, color: importParsed.invalid.length ? "#B00020" : "#5B6B78" }}>{importParsed.invalid.length}</div>
-                  <div style={{ fontSize: 11, color: "#5B6B78" }}>سطر فيه مشكل</div>
-                </div>
-              </div>
-
-              {importParsed.invalid.length > 0 && (
-                <div style={{ background: "#FFF8ED", border: "1px solid #E8B84B", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                  <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 6 }}>سطور غادي يتجاوزو (ما غاديش يتسجلو):</div>
-                  {importParsed.invalid.slice(0, 15).map((x, i) => (
-                    <div key={i} style={{ fontSize: 11, color: "#7A5B10", marginBottom: 3 }}>
-                      سطر Excel {x.line}: {x.reason}
-                    </div>
-                  ))}
-                  {importParsed.invalid.length > 15 && (
-                    <div style={{ fontSize: 11, color: "#7A5B10" }}>و {importParsed.invalid.length - 15} سطر آخر...</div>
-                  )}
-                </div>
-              )}
-
-              {importParsed.valid.length > 0 && (
-                <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
-                  <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 6 }}>معاينة (أول 5):</div>
-                  {importParsed.valid.slice(0, 5).map((r, i) => (
-                    <div key={i} style={{ fontSize: 11, color: "#5B6B78", marginBottom: 3 }}>
-                      عقد {r.contractNo} · عداد {r.meterNo} · {r.period} · {r.readingDate}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={confirmImport}
-                  disabled={!importParsed.valid.length || importRunning}
-                  style={{ flex: 1, padding: 12, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900 }}
-                >
-                  {importRunning
-                    ? `جاري الحفظ... ${importProgress ? `${importProgress.done}/${importProgress.total}` : ""}`
-                    : `تأكيد استيراد ${importParsed.valid.length} قراءة`}
-                </button>
-                <button onClick={resetImport} disabled={importRunning} style={{ padding: 12, borderRadius: 9, border: "1px solid #CBD5DB", background: "#fff", fontWeight: 800 }}>
-                  إلغاء
-                </button>
-              </div>
-            </>
-          )}
-
-          {importResult && (
-            <div style={{ background: "#fff", borderRadius: 12, padding: 14 }}>
-              <div style={{ fontWeight: 900, fontSize: 15, color: "#2E7D32", marginBottom: 6 }}>
-                تم حفظ {importResult.saved} قراءة ✓
-              </div>
-              {importResult.failed.length > 0 && (
-                <>
-                  <div style={{ fontWeight: 900, fontSize: 13, color: "#B00020", marginTop: 10, marginBottom: 6 }}>
-                    {importResult.failed.length} قراءة ما تسجلاتش:
-                  </div>
-                  {importResult.failed.slice(0, 15).map((f, i) => (
-                    <div key={i} style={{ fontSize: 11, color: "#B00020", marginBottom: 3 }}>
-                      عقد {f.contractNo} · {f.period} — {f.message}
-                    </div>
-                  ))}
-                </>
-              )}
-              <button onClick={resetImport} style={{ marginTop: 12, width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900 }}>
-                استيراد ملف آخر
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>

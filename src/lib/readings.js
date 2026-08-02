@@ -141,57 +141,6 @@ export async function saveReading({ contractNo, meterNo, period, readingDate, in
   return data;
 }
 
-const IMPORT_CHUNK_SIZE = 200;
-
-/**
- * Bulk upserts previously-parsed reading rows (from the Excel import) into
- * meter_readings. Runs in chunks to stay within request size limits and
- * reports per-row failures instead of aborting the whole batch.
- *
- * rows: [{ contractNo, meterNo, period, readingDate, indexes }]
- * returns { saved, failed: [{ contractNo, period, message }] }
- */
-export async function bulkImportReadings(rows, { employeeId, employeeName, onProgress } = {}) {
-  let saved = 0;
-  const failed = [];
-
-  for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
-    const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE).map(r => ({
-      contract_no: Number(r.contractNo),
-      meter_no: String(r.meterNo),
-      period: r.period,
-      reading_date: r.readingDate,
-      indexes: r.indexes,
-      employee_id: employeeId || null,
-      employee_name: employeeName || "استيراد Excel",
-      updated_at: new Date().toISOString(),
-    }));
-
-    const { data, error } = await supabase
-      .from("meter_readings")
-      .upsert(chunk, { onConflict: "contract_no,period" })
-      .select("contract_no,period");
-
-    if (error) {
-      // Whole chunk failed (e.g. permissions/network) — try row by row so one
-      // bad row doesn't sink the rest of the chunk.
-      for (const payload of chunk) {
-        const { error: rowError } = await supabase
-          .from("meter_readings")
-          .upsert(payload, { onConflict: "contract_no,period" });
-        if (rowError) failed.push({ contractNo: payload.contract_no, period: payload.period, message: rowError.message });
-        else saved += 1;
-      }
-    } else {
-      saved += (data || chunk).length;
-    }
-
-    onProgress?.(Math.min(i + IMPORT_CHUNK_SIZE, rows.length), rows.length);
-  }
-
-  return { saved, failed };
-}
-
 export function subscribeReadings(callback, onStatus) {
   const channel = supabase
     .channel(`releve-mt-live-${Math.random().toString(36).slice(2)}`)
