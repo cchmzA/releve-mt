@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
+import { Capacitor } from "@capacitor/core";
+import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Share } from "@capacitor/share";
 import { signOut } from "../lib/auth";
 import {
   currentPeriod,
@@ -209,35 +212,68 @@ export default function EmployeeDashboard({ profile }) {
     return acc;
   }, []);
 
-  const exportExcel = () => {
-    const rows = [];
-    visibleClients.forEach(c => {
-      const v = values[c.ct] || empty();
-      const old = previous[c.ct] || c.a || empty();
-      c.p.forEach((poste, i) => {
-        rows.push({
-          "الفترة": periodLabel(period),
-          "الموظف": profile.full_name,
-          "القطاع": c.s,
-          "رقم العداد": c.sn,
-          "رقم العقد": c.ct,
-          "اسم الزبون": c.nm,
-          "Index": i + 1,
-          "البيان": poste,
-          "الفهرس القديم": old[i] ?? "",
-          "الفهرس الجديد": v[i] ?? "",
-          "الفرق": v[i] === "" || old[i] === "" ? "" : Number(v[i]) - Number(old[i]),
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+
+  const exportExcel = async () => {
+    if (exporting) return;
+    setExportError("");
+    setExporting(true);
+    try {
+      const rows = [];
+      visibleClients.forEach(c => {
+        const v = values[c.ct] || empty();
+        const old = previous[c.ct] || c.a || empty();
+        c.p.forEach((poste, i) => {
+          rows.push({
+            "الفترة": periodLabel(period),
+            "الموظف": profile.full_name,
+            "القطاع": c.s,
+            "رقم العداد": c.sn,
+            "رقم العقد": c.ct,
+            "اسم الزبون": c.nm,
+            "Index": i + 1,
+            "البيان": poste,
+            "الفهرس القديم": old[i] ?? "",
+            "الفهرس الجديد": v[i] ?? "",
+            "الفرق": v[i] === "" || old[i] === "" ? "" : Number(v[i]) - Number(old[i]),
+          });
         });
       });
-    });
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [
-      {wch:10},{wch:22},{wch:15},{wch:14},{wch:12},{wch:38},
-      {wch:8},{wch:12},{wch:15},{wch:15},{wch:10}
-    ];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Releve MT");
-    XLSX.writeFile(wb, `releve_MT_${period}.xlsx`);
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws["!cols"] = [
+        {wch:10},{wch:22},{wch:15},{wch:14},{wch:12},{wch:38},
+        {wch:8},{wch:12},{wch:15},{wch:15},{wch:10}
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Releve MT");
+      const fileName = `releve_MT_${period}.xlsx`;
+
+      if (Capacitor.isNativePlatform()) {
+        // The browser "download via <a>" trick that XLSX.writeFile uses
+        // doesn't trigger anything inside an Android WebView — write the
+        // file to app storage instead, then hand it to the native share
+        // sheet so the user can save it to Downloads, WhatsApp, email, etc.
+        const base64 = XLSX.write(wb, { bookType: "xlsx", type: "base64" });
+        const written = await Filesystem.writeFile({
+          path: fileName,
+          data: base64,
+          directory: Directory.Cache,
+        });
+        await Share.share({
+          title: fileName,
+          text: `قراءات ${periodLabel(period)}`,
+          url: written.uri,
+          dialogTitle: "شارك أو احفظ ملف Excel",
+        });
+      } else {
+        XLSX.writeFile(wb, fileName);
+      }
+    } catch (error) {
+      setExportError(error?.message || "تعذر تصدير الملف.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   const goToClient = async contractNo => {
@@ -342,9 +378,15 @@ export default function EmployeeDashboard({ profile }) {
             })}
           </div>
 
+          {exportError && (
+            <div style={{position:"fixed",bottom:64,left:12,right:12,background:"#FFF3F3",color:"#B00020",border:"1px solid #D32F2F",borderRadius:9,padding:10,fontSize:12,zIndex:16}}>
+              {exportError}
+            </div>
+          )}
+
           <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#fff",borderTop:"1px solid #E5E9EC",padding:"9px 12px",display:"flex",gap:7,zIndex:15}}>
             <button onClick={()=>idx>0 && goToClient(baseClients[idx-1].ct)} disabled={idx===0} style={{flex:1,padding:11,borderRadius:9,border:"1px solid #D7DEE3",background:"#fff"}}>السابق</button>
-            <button onClick={exportExcel} style={{flex:1.3,padding:11,borderRadius:9,border:0,background:"#F0A202",fontWeight:900}}>Excel</button>
+            <button onClick={exportExcel} disabled={exporting} style={{flex:1.3,padding:11,borderRadius:9,border:0,background:"#F0A202",fontWeight:900}}>{exporting ? "..." : "Excel"}</button>
             <button onClick={()=>idx<baseClients.length-1 && goToClient(baseClients[idx+1].ct)} disabled={idx===baseClients.length-1} style={{flex:1,padding:11,borderRadius:9,border:0,background:"#0B4F6C",color:"#fff"}}>التالي</button>
           </div>
         </>
