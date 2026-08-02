@@ -7,9 +7,8 @@
 1. أنشئ Repository جديدًا في GitHub.
 2. ارفع محتويات هذا المجلد إلى Repository.
 3. من GitHub افتح: Settings → Secrets and variables → Actions.
-4. أضف Secret باسم `VITE_SUPABASE_URL` وضع رابط مشروع Supabase **بدون** `/rest/v1/`  
-   مثال صحيح: `https://nuplznkawbpdcscpmqbo.supabase.co`
-5. أضف Secret باسم `VITE_SUPABASE_ANON_KEY` وضع مفتاح anon/public (ليس service_role).
+4. أضف Secret باسم `VITE_SUPABASE_URL` وضع رابط مشروع Supabase.
+5. أضف Secret باسم `VITE_SUPABASE_ANON_KEY` وضع مفتاح anon/public.
 6. افتح تبويب Actions.
 7. اختر `Build Relevé MT APK`.
 8. اضغط `Run workflow`.
@@ -18,8 +17,6 @@
 
 لا تضع `service_role key` في GitHub Secrets أو داخل التطبيق. استعمل فقط `anon/public key`.
 
-## ملاحظة عن التحديث
+## ملاحظة
 
-الـAPK المبني من GitHub Actions هو **debug** وموقّع بمفتاح debug الافتراضي لـAndroid.
-إذا ثبّتَ سابقاً نفس `app-debug.apk` من نفس workflow، يمكنك تثبيته فوق النسخة القديمة كتحديث بدون حذف البيانات.
-إذا غيّرتَ `appId` في `capacitor.config.json` أو استخدمت توقيعاً مختلفاً، سيطلب Android حذف النسخة القديمة.
+إذا لم تضبط Secrets، يمكن أن ينجح بناء APK لكن المزامنة مع Supabase لن تعمل. يجب ضبطهما قبل بناء النسخة التي ستستخدمها فعليًا.

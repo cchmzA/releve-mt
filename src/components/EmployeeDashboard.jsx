@@ -10,7 +10,7 @@ import {
   flushPendingReadings,
   pendingReadingsCount,
 } from "../lib/readings";
-import { CLIENTS } from "../data/clients";
+import { loadClients, subscribeClients } from "../lib/clients";
 import { N_POSTES, isLowerIndex, totalIssues } from "../lib/validation";
 
 const empty = () => Array(N_POSTES).fill("");
@@ -29,6 +29,7 @@ function normalize(v) {
 export default function EmployeeDashboard({ profile }) {
   const [period, setPeriod] = useState(currentPeriod());
   const [assigned, setAssigned] = useState([]);
+  const [clients, setClients] = useState([]);
   const [idx, setIdx] = useState(0);
   const [search, setSearch] = useState("");
   const [list, setList] = useState(false);
@@ -40,10 +41,11 @@ export default function EmployeeDashboard({ profile }) {
   const [lastSync, setLastSync] = useState(null);
   const [pending, setPending] = useState(pendingReadingsCount());
   const saveTimer = useRef(null);
+  const pendingSaveRef = useRef(null);
 
   const visibleClients = useMemo(() => {
     const set = new Set(assigned.map(Number));
-    const base = assigned.length ? CLIENTS.filter(c => set.has(Number(c.ct))) : [];
+    const base = assigned.length ? clients.filter(c => set.has(Number(c.ct))) : [];
     const q = search.trim().toLowerCase();
     if (!q) return base;
     return base.filter(c =>
@@ -52,12 +54,12 @@ export default function EmployeeDashboard({ profile }) {
       String(c.s).toLowerCase().includes(q) ||
       String(c.nm).toLowerCase().includes(q)
     );
-  }, [assigned, search]);
+  }, [assigned, search, clients]);
 
   const baseClients = useMemo(() => {
     const set = new Set(assigned.map(Number));
-    return assigned.length ? CLIENTS.filter(c => set.has(Number(c.ct))) : [];
-  }, [assigned]);
+    return assigned.length ? clients.filter(c => set.has(Number(c.ct))) : [];
+  }, [assigned, clients]);
 
   const client = baseClients[idx] || baseClients[0];
   const cVals = client ? (values[client.ct] || empty()) : empty();
@@ -92,6 +94,12 @@ export default function EmployeeDashboard({ profile }) {
   }, [period]);
 
   useEffect(() => {
+    loadClients().then(setClients).catch(() => {});
+    const unsubscribe = subscribeClients(() => loadClients().then(setClients).catch(() => {}));
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     const assignedSet = new Set(assigned.map(Number));
     return subscribeReadings(payload => {
       const row = payload.new || payload.old;
@@ -109,6 +117,7 @@ export default function EmployeeDashboard({ profile }) {
     const online = async () => {
       setSyncStatus("CONNECTING");
       try {
+        await flushPendingEdit();
         await flushPendingReadings();
         setPending(pendingReadingsCount());
         await load();
@@ -131,7 +140,7 @@ export default function EmployeeDashboard({ profile }) {
   const persist = next => {
     setSaveState("saving");
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
+    const doSave = async () => {
       if (!client) return;
       try {
         await saveReading({
@@ -148,8 +157,23 @@ export default function EmployeeDashboard({ profile }) {
       } catch {
         setPending(pendingReadingsCount());
         setSaveState("error");
+      } finally {
+        pendingSaveRef.current = null;
       }
-    }, 500);
+    };
+    pendingSaveRef.current = doSave;
+    saveTimer.current = setTimeout(doSave, 500);
+  };
+
+  // Flush any not-yet-saved edit before we overwrite local state with
+  // whatever is currently on the server — otherwise a sync could wipe
+  // out a digit the person just typed but hasn't been sent yet.
+  const flushPendingEdit = async () => {
+    if (!pendingSaveRef.current) return;
+    clearTimeout(saveTimer.current);
+    const fn = pendingSaveRef.current;
+    pendingSaveRef.current = null;
+    await fn();
   };
 
   const setDigit = (posIdx, raw) => {
@@ -168,6 +192,7 @@ export default function EmployeeDashboard({ profile }) {
   const syncNow = async () => {
     setSyncStatus("CONNECTING");
     try {
+      await flushPendingEdit();
       await flushPendingReadings();
       setPending(pendingReadingsCount());
       await load();
@@ -215,7 +240,8 @@ export default function EmployeeDashboard({ profile }) {
     XLSX.writeFile(wb, `releve_MT_${period}.xlsx`);
   };
 
-  const goToClient = contractNo => {
+  const goToClient = async contractNo => {
+    await flushPendingEdit();
     const i = baseClients.findIndex(c => Number(c.ct) === Number(contractNo));
     if (i >= 0) setIdx(i);
     setList(false);
@@ -296,19 +322,19 @@ export default function EmployeeDashboard({ profile }) {
 
               return (
                 <div key={i} style={{
-                  display:"grid",gridTemplateColumns:"30px 60px 76px 1fr 58px",
-                  alignItems:"center",gap:7,background:"#fff",borderRadius:11,padding:"9px 8px",marginBottom:7,
+                  display:"grid",gridTemplateColumns:"24px 50px 54px 1fr 46px",minWidth:0,
+                  alignItems:"center",gap:6,background:"#fff",borderRadius:11,padding:"9px 7px",marginBottom:7,
                   border: lowerAlert ? "2px solid #D32F2F" : totalBad ? "2px solid #F0A202" : "1px solid transparent"
                 }}>
-                  <div style={{background:"#0B4F6C",color:"#fff",borderRadius:7,padding:"6px 2px",textAlign:"center",fontWeight:800,fontSize:11}}>{i+1}</div>
-                  <div style={{fontWeight:800,fontSize:12}}>{poste}</div>
-                  <div style={{fontSize:10,textAlign:"center",color:"#5B6B78"}}>
-                    <div>قديم</div><b>{oldValue === "" ? "—" : Number(oldValue).toLocaleString("en-US")}</b>
+                  <div style={{background:"#0B4F6C",color:"#fff",borderRadius:7,padding:"6px 2px",textAlign:"center",fontWeight:800,fontSize:10}}>{i+1}</div>
+                  <div style={{fontWeight:800,fontSize:11,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{poste}</div>
+                  <div style={{fontSize:9,textAlign:"center",color:"#5B6B78",minWidth:0}}>
+                    <div>قديم</div><b style={{fontSize:10,wordBreak:"break-all"}}>{oldValue === "" ? "—" : Number(oldValue).toLocaleString("en-US")}</b>
                   </div>
                   <input value={newValue} onChange={e=>setDigit(i,e.target.value)} inputMode="numeric"
                     placeholder="Index"
-                    style={{width:"100%",padding:"9px 5px",borderRadius:8,border:lowerAlert?"2px solid #D32F2F":"1px solid #CBD5DB",fontFamily:"monospace",fontSize:16,fontWeight:800,textAlign:"center"}} />
-                  <div style={{fontSize:10,textAlign:"center",fontWeight:800,color:lowerAlert?"#D32F2F":diff === null ? "#9AA6B0":diff<0?"#D32F2F":"#2E7D32"}}>
+                    style={{width:"100%",minWidth:0,padding:"9px 4px",borderRadius:8,border:lowerAlert?"2px solid #D32F2F":"1px solid #CBD5DB",fontFamily:"monospace",fontSize:15,fontWeight:800,textAlign:"center"}} />
+                  <div style={{fontSize:9,textAlign:"center",fontWeight:800,color:lowerAlert?"#D32F2F":diff === null ? "#9AA6B0":diff<0?"#D32F2F":"#2E7D32",wordBreak:"break-all"}}>
                     {diff === null ? "—" : (diff > 0 ? "+" : "") + diff}
                   </div>
                 </div>

@@ -2,13 +2,20 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 import { subscribeReadings } from "../lib/readings";
 import { signOut } from "../lib/auth";
-import { CLIENTS } from "../data/clients";
+import { loadClients, addClient, deactivateClient, subscribeClients } from "../lib/clients";
+import { bulkImportReadings } from "../lib/readings";
+import { parseReadingsWorkbook } from "../lib/importExcel";
 
 const byContract = (a, b) => Number(a.ct) - Number(b.ct);
 
 export default function ManagerDashboard({ profile }) {
   const [tab, setTab] = useState("readings");
   const [rows, setRows] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [clientsLoading, setClientsLoading] = useState(true);
+  const [newClient, setNewClient] = useState({ contractNo: "", meterNo: "", sector: "", name: "" });
+  const [addingClient, setAddingClient] = useState(false);
+  const [clientMessage, setClientMessage] = useState("");
   const [period, setPeriod] = useState(new Date().toISOString().slice(0, 7));
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
@@ -23,6 +30,14 @@ export default function ManagerDashboard({ profile }) {
   const [savingContract, setSavingContract] = useState(null);
   const [assignmentLoading, setAssignmentLoading] = useState(false);
   const [message, setMessage] = useState("");
+
+  const [importParsed, setImportParsed] = useState(null); // { valid, invalid, total }
+  const [importFileName, setImportFileName] = useState("");
+  const [importParsing, setImportParsing] = useState(false);
+  const [importRunning, setImportRunning] = useState(false);
+  const [importProgress, setImportProgress] = useState(null); // { done, total }
+  const [importResult, setImportResult] = useState(null); // { saved, failed }
+  const [importError, setImportError] = useState("");
 
   const loadReadings = async () => {
     setLoading(true);
@@ -104,6 +119,105 @@ export default function ManagerDashboard({ profile }) {
     loadEmployeesAndAssignments();
   }, []);
 
+  const loadClientsList = async () => {
+    setClientsLoading(true);
+    try {
+      setClients(await loadClients());
+    } finally {
+      setClientsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadClientsList();
+    const unsubscribe = subscribeClients(() => loadClientsList());
+    return unsubscribe;
+  }, []);
+
+  const removeClient = async c => {
+    if (!window.confirm(`متأكد باغي تحذف "${c.nm}" (عقد ${c.ct})؟ الفهارس القديمة غادي تبقى محفوظة، غير الزبون غادي يختفي من اللوائح.`)) return;
+    try {
+      await deactivateClient(c.ct);
+      setClients(prev => prev.filter(x => Number(x.ct) !== Number(c.ct)));
+    } catch (error) {
+      alert(error.message || "تعذر حذف الزبون.");
+    }
+  };
+
+  const submitNewClient = async e => {
+    e.preventDefault();
+    if (!newClient.contractNo || !newClient.meterNo || !newClient.sector || !newClient.name) {
+      setClientMessage("عمر جميع الخانات قبل الإضافة.");
+      return;
+    }
+    setAddingClient(true);
+    setClientMessage("");
+    try {
+      const created = await addClient({
+        contractNo: newClient.contractNo,
+        meterNo: newClient.meterNo,
+        sector: newClient.sector,
+        name: newClient.name,
+      });
+      setClients(prev => [...prev, created].sort(byContract));
+      setNewClient({ contractNo: "", meterNo: "", sector: "", name: "" });
+      setClientMessage("تمت إضافة الزبون ✓");
+    } catch (error) {
+      setClientMessage(error.message || "تعذرت إضافة الزبون (تأكد أن رقم العقد غير مستعمل من قبل).");
+    } finally {
+      setAddingClient(false);
+    }
+  };
+
+  const handleImportFile = async e => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+
+    setImportError("");
+    setImportResult(null);
+    setImportParsed(null);
+    setImportFileName(file.name);
+    setImportParsing(true);
+    try {
+      const buffer = await file.arrayBuffer();
+      const knownContractNos = clients.map(c => Number(c.ct));
+      const parsed = parseReadingsWorkbook(buffer, knownContractNos);
+      setImportParsed(parsed);
+    } catch (error) {
+      setImportError(error.message || "تعذرت قراءة الملف. تأكد أنه ملف Excel (.xlsx) صحيح.");
+    } finally {
+      setImportParsing(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!importParsed?.valid?.length || importRunning) return;
+    setImportRunning(true);
+    setImportProgress({ done: 0, total: importParsed.valid.length });
+    setImportResult(null);
+    try {
+      const result = await bulkImportReadings(importParsed.valid, {
+        employeeName: `استيراد Excel — ${profile.full_name}`,
+        onProgress: (done, total) => setImportProgress({ done, total }),
+      });
+      setImportResult(result);
+      if (result.saved > 0) await loadReadings();
+    } catch (error) {
+      setImportError(error.message || "تعذر الاستيراد.");
+    } finally {
+      setImportRunning(false);
+    }
+  };
+
+  const resetImport = () => {
+    setImportParsed(null);
+    setImportFileName("");
+    setImportResult(null);
+    setImportError("");
+    setImportProgress(null);
+  };
+
   const selectedEmployeeName = employees.find(e => e.id === selectedEmployee)?.full_name || "";
 
   const selectedContracts = useMemo(() => {
@@ -117,7 +231,7 @@ export default function ManagerDashboard({ profile }) {
 
   const assignmentVisibleClients = useMemo(() => {
     const q = assignmentSearch.trim().toLowerCase();
-    return CLIENTS
+    return clients
       .filter(c => {
         const assigned = selectedContracts.has(Number(c.ct));
         if (assignmentFilter === "assigned" && !assigned) return false;
@@ -126,7 +240,7 @@ export default function ManagerDashboard({ profile }) {
         return [c.ct, c.sn, c.s, c.nm].some(v => String(v).toLowerCase().includes(q));
       })
       .sort(byContract);
-  }, [assignmentSearch, assignmentFilter, selectedContracts]);
+  }, [assignmentSearch, assignmentFilter, selectedContracts, clients]);
 
   const employeeStats = useMemo(() => {
     const counts = Object.fromEntries(employees.map(e => [e.id, 0]));
@@ -245,10 +359,12 @@ export default function ManagerDashboard({ profile }) {
         <div style={{ display: "flex", gap: 7, marginTop: 14 }}>
           <button onClick={() => setTab("readings")} style={tabButton(tab === "readings")}>القراءات</button>
           <button onClick={() => setTab("assignments")} style={tabButton(tab === "assignments")}>الموظفون والزبناء</button>
+          <button onClick={() => setTab("clients")} style={tabButton(tab === "clients")}>الزبناء</button>
+          <button onClick={() => setTab("import")} style={tabButton(tab === "import")}>استيراد</button>
         </div>
       </header>
 
-      {tab === "readings" ? (
+      {tab === "readings" && (
         <div style={{ padding: 16 }}>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
             <input type="month" value={period} onChange={e => setPeriod(e.target.value)} style={{ padding: 11, borderRadius: 9, border: "1px solid #CBD5DB" }} />
@@ -271,7 +387,9 @@ export default function ManagerDashboard({ profile }) {
           ))}
           {!loading && filtered.length === 0 && <Empty text="لا توجد قراءات لهذه الفترة." />}
         </div>
-      ) : (
+      )}
+
+      {tab === "assignments" && (
         <div style={{ padding: 16 }}>
           <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
             <div style={{ fontWeight: 900, fontSize: 16 }}>توزيع الزبناء على الموظفين</div>
@@ -299,7 +417,7 @@ export default function ManagerDashboard({ profile }) {
             <>
               <div style={{ background: "#fff", borderRadius: 14, padding: 12, marginBottom: 10 }}>
                 <div style={{ fontWeight: 900 }}>الموظف: {selectedEmployeeName || "—"}</div>
-                <div style={{ fontSize: 12, color: "#5B6B78", marginTop: 3 }}>{selectedContracts.size} / {CLIENTS.length} زبون مخصص</div>
+                <div style={{ fontSize: 12, color: "#5B6B78", marginTop: 3 }}>{selectedContracts.size} / {clients.length} زبون مخصص</div>
               </div>
 
               <div style={{ display: "flex", gap: 7, marginBottom: 8 }}>
@@ -341,9 +459,156 @@ export default function ManagerDashboard({ profile }) {
           )}
         </div>
       )}
+
+      {tab === "clients" && (
+        <div style={{ padding: 16 }}>
+          <form onSubmit={submitNewClient} style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 10 }}>زيادة زبون MT جديد</div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <input value={newClient.name} onChange={e => setNewClient(p => ({ ...p, name: e.target.value }))}
+                placeholder="اسم الزبون" style={inputStyle} />
+              <input value={newClient.sector} onChange={e => setNewClient(p => ({ ...p, sector: e.target.value }))}
+                placeholder="القطاع (مثلا LAAOUINA)" style={inputStyle} />
+              <input value={newClient.meterNo} onChange={e => setNewClient(p => ({ ...p, meterNo: e.target.value }))}
+                placeholder="رقم العداد (N° SERIE)" style={inputStyle} />
+              <input value={newClient.contractNo} onChange={e => setNewClient(p => ({ ...p, contractNo: e.target.value.replace(/[^0-9]/g, "") }))}
+                placeholder="رقم العقد (أرقام فقط)" inputMode="numeric" style={inputStyle} />
+            </div>
+            {clientMessage && (
+              <div style={{ marginTop: 10, fontSize: 12, color: clientMessage.includes("✓") ? "#2E7D32" : "#B00020" }}>{clientMessage}</div>
+            )}
+            <button type="submit" disabled={addingClient} style={{ marginTop: 10, width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900 }}>
+              {addingClient ? "جاري الإضافة..." : "إضافة الزبون"}
+            </button>
+            <div style={{ marginTop: 8, fontSize: 11, color: "#5B6B78" }}>
+              الفهرس القديم سيبدأ من صفر لجميع الخانات (22 خانة بنفس ترتيب Waterp)، وبعد الإضافة خاصك تدير "تخصيص" ليه من تبويب "الموظفون والزبناء".
+            </div>
+          </form>
+
+          <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 10, fontSize: 13, fontWeight: 800 }}>
+            {clientsLoading ? "جاري التحميل..." : `${clients.length} زبون MT مسجل`}
+          </div>
+
+          {clients.slice().sort(byContract).map(c => (
+            <div key={c.ct} style={{ background: "#fff", borderRadius: 11, padding: 11, marginBottom: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <div>
+                <div style={{ fontWeight: 900 }}>{c.nm}</div>
+                <div style={{ fontSize: 11, color: "#5B6B78", marginTop: 3 }}>{c.s} · عقد {c.ct} · عداد {c.sn}</div>
+              </div>
+              <button onClick={() => removeClient(c)} style={{ flexShrink: 0, border: "1px solid #E0A0A0", background: "#FDEDED", color: "#B00020", borderRadius: 8, padding: "7px 10px", fontWeight: 800, fontSize: 12 }}>
+                حذف
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === "import" && (
+        <div style={{ padding: 16 }}>
+          <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
+            <div style={{ fontWeight: 900, fontSize: 16 }}>استيراد قراءات من Excel</div>
+            <div style={{ color: "#5B6B78", fontSize: 12, marginTop: 5 }}>
+              عمر ملف النموذج (رقم العقد، الفترة، تاريخ القراءة، و22 خانة Index)، ثم اختاره هنا للمعاينة قبل الحفظ. رقم العقد خاصو يطابق زبون موجود، والفترة والقراءة غادي يتسجلو أو يتحدثو حسب نفس القاعدة ديال (عقد + فترة).
+            </div>
+          </div>
+
+          <label style={{
+            display: "block", background: "#fff", border: "2px dashed #B7C4CC", borderRadius: 12,
+            padding: 20, textAlign: "center", marginBottom: 12, cursor: "pointer",
+          }}>
+            <input type="file" accept=".xlsx,.xls" onChange={handleImportFile} style={{ display: "none" }} disabled={importParsing || importRunning} />
+            <div style={{ fontWeight: 900, color: "#0B4F6C" }}>{importParsing ? "جاري القراءة..." : "اختر ملف Excel (.xlsx)"}</div>
+            {importFileName && <div style={{ fontSize: 12, color: "#5B6B78", marginTop: 6 }}>{importFileName}</div>}
+          </label>
+
+          {importError && (
+            <div style={{ background: "#FFF3F3", color: "#B00020", border: "1px solid #D32F2F", borderRadius: 9, padding: 10, marginBottom: 12, fontSize: 12 }}>{importError}</div>
+          )}
+
+          {importParsed && !importResult && (
+            <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <div style={{ flex: 1, background: "#fff", borderRadius: 12, padding: 12, textAlign: "center" }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: "#2E7D32" }}>{importParsed.valid.length}</div>
+                  <div style={{ fontSize: 11, color: "#5B6B78" }}>سطر صحيح</div>
+                </div>
+                <div style={{ flex: 1, background: "#fff", borderRadius: 12, padding: 12, textAlign: "center" }}>
+                  <div style={{ fontSize: 22, fontWeight: 900, color: importParsed.invalid.length ? "#B00020" : "#5B6B78" }}>{importParsed.invalid.length}</div>
+                  <div style={{ fontSize: 11, color: "#5B6B78" }}>سطر فيه مشكل</div>
+                </div>
+              </div>
+
+              {importParsed.invalid.length > 0 && (
+                <div style={{ background: "#FFF8ED", border: "1px solid #E8B84B", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 6 }}>سطور غادي يتجاوزو (ما غاديش يتسجلو):</div>
+                  {importParsed.invalid.slice(0, 15).map((x, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#7A5B10", marginBottom: 3 }}>
+                      سطر Excel {x.line}: {x.reason}
+                    </div>
+                  ))}
+                  {importParsed.invalid.length > 15 && (
+                    <div style={{ fontSize: 11, color: "#7A5B10" }}>و {importParsed.invalid.length - 15} سطر آخر...</div>
+                  )}
+                </div>
+              )}
+
+              {importParsed.valid.length > 0 && (
+                <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+                  <div style={{ fontWeight: 900, fontSize: 13, marginBottom: 6 }}>معاينة (أول 5):</div>
+                  {importParsed.valid.slice(0, 5).map((r, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#5B6B78", marginBottom: 3 }}>
+                      عقد {r.contractNo} · عداد {r.meterNo} · {r.period} · {r.readingDate}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={confirmImport}
+                  disabled={!importParsed.valid.length || importRunning}
+                  style={{ flex: 1, padding: 12, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900 }}
+                >
+                  {importRunning
+                    ? `جاري الحفظ... ${importProgress ? `${importProgress.done}/${importProgress.total}` : ""}`
+                    : `تأكيد استيراد ${importParsed.valid.length} قراءة`}
+                </button>
+                <button onClick={resetImport} disabled={importRunning} style={{ padding: 12, borderRadius: 9, border: "1px solid #CBD5DB", background: "#fff", fontWeight: 800 }}>
+                  إلغاء
+                </button>
+              </div>
+            </>
+          )}
+
+          {importResult && (
+            <div style={{ background: "#fff", borderRadius: 12, padding: 14 }}>
+              <div style={{ fontWeight: 900, fontSize: 15, color: "#2E7D32", marginBottom: 6 }}>
+                تم حفظ {importResult.saved} قراءة ✓
+              </div>
+              {importResult.failed.length > 0 && (
+                <>
+                  <div style={{ fontWeight: 900, fontSize: 13, color: "#B00020", marginTop: 10, marginBottom: 6 }}>
+                    {importResult.failed.length} قراءة ما تسجلاتش:
+                  </div>
+                  {importResult.failed.slice(0, 15).map((f, i) => (
+                    <div key={i} style={{ fontSize: 11, color: "#B00020", marginBottom: 3 }}>
+                      عقد {f.contractNo} · {f.period} — {f.message}
+                    </div>
+                  ))}
+                </>
+              )}
+              <button onClick={resetImport} style={{ marginTop: 12, width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900 }}>
+                استيراد ملف آخر
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
+
+const inputStyle = { padding: 11, borderRadius: 9, border: "1px solid #CBD5DB", fontFamily: "inherit" };
 
 function tabButton(active) {
   return {
