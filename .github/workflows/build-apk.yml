@@ -1,0 +1,78 @@
+name: Build Relevé MT APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Configure Supabase
+        run: |
+          RAW_URL="${{ secrets.VITE_SUPABASE_URL }}"
+          ANON_KEY="${{ secrets.VITE_SUPABASE_ANON_KEY }}"
+
+          if [ -z "$RAW_URL" ] || [ -z "$ANON_KEY" ]; then
+            echo "::error::VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY secret is missing. Set both in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          # Strip any trailing path (e.g. /rest/v1/, /auth/v1/) and trailing
+          # slashes from the URL secret — the Supabase client needs only the
+          # bare project URL (https://xxxxx.supabase.co).
+          CLEAN_URL=$(echo "$RAW_URL" | sed -E 's#(/(rest|auth|realtime|storage)/v1/?.*)?/*$##')
+
+          cat > .env <<ENVEOF
+          VITE_SUPABASE_URL=$CLEAN_URL
+          VITE_SUPABASE_ANON_KEY=$ANON_KEY
+          ENVEOF
+
+          echo "Using Supabase URL: $CLEAN_URL"
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Use fixed debug keystore (keeps updates installable)
+        run: |
+          mkdir -p ~/.android
+          cp keystore/debug.keystore ~/.android/debug.keystore
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: releve-mt-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
