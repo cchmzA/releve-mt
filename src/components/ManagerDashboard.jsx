@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { exportRowsViaSupabase } from "../lib/exportExcel";
+import { parseReadingsWorkbook } from "../lib/importExcel";
 import { supabase } from "../lib/supabaseClient";
 import { subscribeReadings } from "../lib/readings";
 import { signOut } from "../lib/auth";
@@ -30,6 +31,9 @@ export default function ManagerDashboard({ profile }) {
   const [assignmentLoading, setAssignmentLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [exportingAll, setExportingAll] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
 
   const loadReadings = async () => {
     setLoading(true);
@@ -322,6 +326,59 @@ export default function ManagerDashboard({ profile }) {
     }
   };
 
+  // يقرأ ملف Excel فيه قراءات (أشهر سابقة عادة) ويتحقق من صحة كل سطر
+  // بدون ما يحفظ أي شي بعد — الحفظ الفعلي يصير بعد ضغط زر التأكيد.
+  const handleImportFile = async e => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const knownContractNos = clients.map(c => c.ct);
+      const result = parseReadingsWorkbook(buffer, knownContractNos);
+      setImportResult(result);
+    } catch (error) {
+      alert(error.message || "تعذر قراءة الملف. تأكد إنه ملف Excel صحيح.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // يحفظ كل الأسطر الصالحة دفعة وحدة (upsert) بجدول القراءات.
+  const confirmImport = async () => {
+    if (!importResult?.valid?.length || importing) return;
+    setImporting(true);
+    try {
+      const payloads = importResult.valid.map(r => ({
+        contract_no: r.contractNo,
+        meter_no: r.meterNo,
+        period: r.period,
+        reading_date: r.readingDate,
+        indexes: r.indexes,
+        employee_id: profile.id,
+        employee_name: `${profile.full_name} (استيراد)`,
+        updated_at: new Date().toISOString(),
+      }));
+      const chunkSize = 500;
+      for (let i = 0; i < payloads.length; i += chunkSize) {
+        const chunk = payloads.slice(i, i + chunkSize);
+        const { error } = await supabase
+          .from("meter_readings")
+          .upsert(chunk, { onConflict: "contract_no,period" });
+        if (error) throw error;
+      }
+      alert(`تم استيراد ${payloads.length} قراءة بنجاح.`);
+      setImportResult(null);
+      loadReadings();
+    } catch (error) {
+      alert(error.message || "تعذر حفظ القراءات المستوردة.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   return (
     <div dir="rtl" style={{ minHeight: "100vh", background: "#F5F6F8", paddingBottom: 30, fontFamily: "Arial,sans-serif", color: "#16202A" }}>
       <header style={{ background: "#0B4F6C", color: "#fff", padding: 16 }}>
@@ -352,6 +409,40 @@ export default function ManagerDashboard({ profile }) {
           <button onClick={exportAllClients} disabled={exportingAll || !clients.length} style={{ width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#F0A202", fontWeight: 900, marginBottom: 12, opacity: exportingAll ? .7 : 1 }}>
             {exportingAll ? "جاري التصدير..." : "تصدير جميع الزبناء (Excel)"}
           </button>
+
+          <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
+            <div style={{ fontWeight: 900, marginBottom: 8 }}>استيراد قراءات من ملف Excel (أشهر سابقة)</div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              onChange={handleImportFile}
+              disabled={importing}
+              style={{ marginBottom: 8, fontSize: 12 }}
+            />
+            {importing && <div style={{ fontSize: 12, color: "#5B6B78" }}>جاري المعالجة...</div>}
+            {importResult && (
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                <div style={{ color: "#2E7D32", fontWeight: 800 }}>✓ صالحة للحفظ: {importResult.valid.length}</div>
+                {importResult.invalid.length > 0 && (
+                  <div style={{ color: "#B00020", fontWeight: 800, marginTop: 4 }}>⚠ غير صالحة: {importResult.invalid.length}</div>
+                )}
+                {importResult.invalid.length > 0 && (
+                  <ul style={{ maxHeight: 150, overflow: "auto", fontSize: 11, color: "#5B6B78", marginTop: 6, paddingInlineStart: 18 }}>
+                    {importResult.invalid.slice(0, 50).map((x, idx) => (
+                      <li key={idx}>سطر {x.line} (عقد {x.contractNo || "—"}): {x.reason}</li>
+                    ))}
+                    {importResult.invalid.length > 50 && <li>... و{importResult.invalid.length - 50} سطر آخر</li>}
+                  </ul>
+                )}
+                {importResult.valid.length > 0 && (
+                  <button onClick={confirmImport} disabled={importing} style={{ marginTop: 10, width: "100%", padding: 11, borderRadius: 9, border: 0, background: "#0B4F6C", color: "#fff", fontWeight: 900, opacity: importing ? .7 : 1 }}>
+                    {importing ? "جاري الحفظ..." : `تأكيد استيراد ${importResult.valid.length} قراءة`}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
 
           <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
             <b>{filtered.length}</b> قراءة في {period}
