@@ -369,7 +369,7 @@ export default function ManagerDashboard({ profile }) {
           ))}
           {!loading && filtered.length === 0 && <Empty text="لا توجد قراءات لهذه الفترة." />}
         </div>
-      ) : (
+      ) : tab === "assignments" ? (
         <div style={{ padding: 16 }}>
           <div style={{ background: "#fff", borderRadius: 14, padding: 14, marginBottom: 12 }}>
             <div style={{ fontWeight: 900, fontSize: 16 }}>توزيع الزبناء على الموظفين</div>
@@ -438,7 +438,7 @@ export default function ManagerDashboard({ profile }) {
             </>
           )}
         </div>
-      )}
+      ) : null}
 
       {tab === "clients" && (
         <div style={{ padding: 16 }}>
