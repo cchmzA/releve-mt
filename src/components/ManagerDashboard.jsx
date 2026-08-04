@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { exportRowsToExcel } from "../lib/exportExcel";
+import { exportRowsViaSupabase } from "../lib/exportExcel";
 import { supabase } from "../lib/supabaseClient";
 import { subscribeReadings } from "../lib/readings";
 import { signOut } from "../lib/auth";
@@ -290,6 +290,9 @@ export default function ManagerDashboard({ profile }) {
     if (exportingAll) return;
     setExportingAll(true);
     try {
+      // نبعث بس البيانات الخام لكل الزبناء — شكل ملف الإكسل يُبنى كامل
+      // داخل Supabase Edge Function "export-releve-xlsx"، بنفس طريقة
+      // تصدير الموظف.
       const rowsByContract = new Map(rows.map(r => [Number(r.contract_no), r]));
       const exportRows = [];
       clients.slice().sort(byContract).forEach(c => {
@@ -297,32 +300,21 @@ export default function ManagerDashboard({ profile }) {
         const newVals = row?.indexes || [];
         const old = c.a || [];
         c.p.forEach((poste, i) => {
-          const oldV = old[i] ?? "";
-          const newV = newVals[i] ?? "";
           exportRows.push({
-            "الفترة": period,
-            "الموظف": row?.employee_name || "—",
-            "القطاع": c.s,
-            "رقم العداد": c.sn,
-            "رقم العقد": c.ct,
-            "اسم الزبون": c.nm,
-            "Index": i + 1,
-            "البيان": poste,
-            "الفهرس القديم": oldV,
-            "الفهرس الجديد": newV,
-            "الفرق": newV === "" || oldV === "" ? "" : Number(newV) - Number(oldV),
+            secteur: c.s,
+            clientName: c.nm,
+            meterNo: c.sn,
+            contractNo: c.ct,
+            employeeId: row?.employee_id ?? "",
+            employee: row?.employee_name || "—",
+            seq: i + 1,
+            label: poste,
+            oldIndex: old[i] ?? "",
+            newIndex: newVals[i] ?? "",
           });
         });
       });
-      await exportRowsToExcel({
-        rows: exportRows,
-        columnWidths: [
-          {wch:10},{wch:22},{wch:15},{wch:14},{wch:12},{wch:38},
-          {wch:8},{wch:12},{wch:15},{wch:15},{wch:10}
-        ],
-        sheetName: "كل الزبناء",
-        fileName: `releve_MT_كل_الزبناء_${period}.xlsx`,
-      });
+      await exportRowsViaSupabase({ rows: exportRows, period });
     } catch (error) {
       alert(error.message || "تعذر تصدير ملف Excel.");
     } finally {

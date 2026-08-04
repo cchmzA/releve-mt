@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { exportRowsToExcel } from "../lib/exportExcel";
+import { exportRowsViaSupabase } from "../lib/exportExcel";
 import { signOut } from "../lib/auth";
 import {
   currentPeriod,
@@ -214,35 +214,29 @@ export default function EmployeeDashboard({ profile }) {
     if (exporting) return;
     setExporting(true);
     try {
+      // نبعث بس البيانات الخام — شكل ملف الإكسل (الأعمدة/الشيتات) يُبنى
+      // كامل داخل Supabase Edge Function "export-releve-xlsx"، عشان أي
+      // تغيير مستقبلي بالشكل يصير هناك بس، بدون تعديل أو rebuild للتطبيق.
       const rows = [];
       visibleClients.forEach(c => {
         const v = values[c.ct] || empty();
         const old = previous[c.ct] || c.a || empty();
         c.p.forEach((poste, i) => {
           rows.push({
-            "الفترة": periodLabel(period),
-            "الموظف": profile.full_name,
-            "القطاع": c.s,
-            "رقم العداد": c.sn,
-            "رقم العقد": c.ct,
-            "اسم الزبون": c.nm,
-            "Index": i + 1,
-            "البيان": poste,
-            "الفهرس القديم": old[i] ?? "",
-            "الفهرس الجديد": v[i] ?? "",
-            "الفرق": v[i] === "" || old[i] === "" ? "" : Number(v[i]) - Number(old[i]),
+            secteur: c.s,
+            clientName: c.nm,
+            meterNo: c.sn,
+            contractNo: c.ct,
+            employeeId: profile.id,
+            employee: profile.full_name,
+            seq: i + 1,
+            label: poste,
+            oldIndex: old[i] ?? "",
+            newIndex: v[i] ?? "",
           });
         });
       });
-      await exportRowsToExcel({
-        rows,
-        columnWidths: [
-          {wch:10},{wch:22},{wch:15},{wch:14},{wch:12},{wch:38},
-          {wch:8},{wch:12},{wch:15},{wch:15},{wch:10}
-        ],
-        sheetName: "Releve MT",
-        fileName: `releve_MT_${period}.xlsx`,
-      });
+      await exportRowsViaSupabase({ rows, period });
     } catch (error) {
       alert(error.message || "تعذر تصدير ملف Excel.");
     } finally {
