@@ -7,7 +7,7 @@ export const TOTAL_GROUPS = [
   { parts: [0, 1, 2], total: 3, label: "1 + 2 + 3 → 4" },
   { parts: [4, 5, 6], total: 7, label: "5 + 6 + 7 → 8" },
   { parts: [8, 9, 10], total: 11, label: "9 + 10 + 11 → 12" },
-  { parts: [16, 17, 18], total: 12, label: "17 + 18 + 19 → 13" },
+  { parts: [16, 17, 18], total: 3, label: "17 + 18 + 19 → 4" },
   { parts: [19, 20, 21], total: 11, label: "20 + 21 + 22 → 12" },
 ];
 

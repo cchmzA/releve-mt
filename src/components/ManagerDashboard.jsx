@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { exportRowsViaSupabase } from "../lib/exportExcel";
-import { parseReadingsWorkbook } from "../lib/importExcel";
+import { parseHtaWorkbook } from "../lib/importExcel";
 import { supabase } from "../lib/supabaseClient";
 import { subscribeReadings } from "../lib/readings";
 import { signOut } from "../lib/auth";
@@ -337,7 +337,7 @@ export default function ManagerDashboard({ profile }) {
     try {
       const buffer = await file.arrayBuffer();
       const knownContractNos = clients.map(c => c.ct);
-      const result = parseReadingsWorkbook(buffer, knownContractNos);
+      const result = parseHtaWorkbook(buffer, knownContractNos, period);
       setImportResult(result);
     } catch (error) {
       alert(error.message || "تعذر قراءة الملف. تأكد إنه ملف Excel صحيح.");
@@ -412,6 +412,10 @@ export default function ManagerDashboard({ profile }) {
 
           <div style={{ background: "#fff", borderRadius: 12, padding: 12, marginBottom: 12 }}>
             <div style={{ fontWeight: 900, marginBottom: 8 }}>استيراد قراءات من ملف Excel (أشهر سابقة)</div>
+            <div style={{ fontSize: 11, color: "#5B6B78", marginBottom: 8 }}>
+              الملف لازم يكون بنفس شكل ملف التصدير (شيت HTA). القراءات بتُسجَّل
+              على الفترة المختارة فوق ({period}).
+            </div>
             <input
               ref={fileInputRef}
               type="file"
